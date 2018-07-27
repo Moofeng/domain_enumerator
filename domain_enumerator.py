@@ -1,13 +1,19 @@
-import asyncio
+import psycopg2
 import argparse
-import aiodns
+import asyncio
 import logging
+import aiodns
 import time
+import re
 
 
 logging.basicConfig(level=logging.INFO,
-                    format='%(asctime)s - %(levelname)s - %(message)s')
+                    format='[+] %(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+DB_HOST = 'crt.sh'
+DB_NAME = 'certwatch'
+DB_USER = 'guest'
 
 
 class DomainEnumerator(object):
@@ -19,18 +25,8 @@ class DomainEnumerator(object):
         self.queue = asyncio.Queue(loop=self.loop)
         self.resolver = aiodns.DNSResolver(
             timeout=timeout, loop=self.loop, nameservers=[nameserver])
-        self.load_subnames()
         self.found_subs = {}
         eval("logger.setLevel(logging.{})".format(log_level))
-
-    def load_subnames(self):
-        logger.info("[+] Loading subnames...")
-        with open(self.sub_filename) as f:
-            for line in f:
-                sub = line.strip().lower()
-                if sub == '':
-                    continue
-                self.queue.put_nowait(sub)
 
     async def query(self):
         while not self.queue.empty():
@@ -54,18 +50,58 @@ class DomainEnumerator(object):
                     if ip in ['0.0.0.1', '0.0.0.0', '1.1.1.1']:
                         ips.remove(ip)
                 if ips:
-                    logger.info('{domain}: {ips}'.format(
+                    logger.debug('{domain}: {ips}'.format(
                         domain=full_domain, ips=ips))
                     self.found_subs[full_domain] = ips
 
-    def run(self):
-        start_time = time.time()
+    def get_by_CT(self):
+        # 该功能容易出现查询超时
+        logger.info("正在通过检索CT日志枚举子域名...")
+        try:
+            conn = psycopg2.connect(
+                "dbname={0} user={1} host={2}".format(DB_NAME, DB_USER, DB_HOST))
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT ci.NAME_VALUE NAME_VALUE FROM certificate_identity ci WHERE ci.NAME_TYPE = 'dNSName' AND reverse(lower(ci.NAME_VALUE)) LIKE reverse(lower('%{}'));".format(self.domain))
+        except:
+            logger.error("连接到crt.sh的数据库失败！" + str(e))
+        subdomains = []
+        domain_len = -len(self.domain)-1
+        for i in cursor.fetchall():
+            matches = re.findall(r"\'(.+?)\'", str(i))
+            for subdomain in matches:
+                if subdomain not in subdomains:
+                    if ".{}".format(self.domain) in subdomain:
+                        subdomains.append(subdomain)
+        logger.info("在数据库中找到以下公开的证书：")
+        logger.info(subdomains)
+        for subdomain in subdomains:
+            self.queue.put_nowait(subdomain[:domain_len])
+
+    def get_by_dic(self):
+        logger.info("正在从字典中加载子域名...")
+        with open(self.sub_filename) as f:
+            for line in f:
+                sub = line.strip().lower()
+                if sub == '':
+                    continue
+                self.queue.put_nowait(sub)
+        logger.info("成功加载{size}个子域名!".format(size=self.queue.qsize()))
         tasks = (self.query() for _ in range(self.num))
         self.loop.run_until_complete(asyncio.gather(*tasks))
-        logger.debug(self.found_subs)
-        logger.info('一共找到 {domain} 下 {length} 个子域名, 总耗时为 {second:.5}s'.format(
-            domain=self.domain, length=len(self.found_subs), second=time.time()-start_time))
         self.loop.close()
+
+    def get_by_virustotal(self):
+       pass 
+
+    def run(self):
+        start_time = time.time()
+        logger.info("正在进行子域名枚举...")
+        self.get_by_CT()
+        self.get_by_dic()
+        logger.info('一共找到 {domain} 下 {length} 个子域名, 总耗时为 {second:.3f}s'.format(
+            domain=self.domain, length=len(self.found_subs), second=time.time()-start_time))
+        logger.info(self.found_subs)
 
 
 def main():
@@ -73,14 +109,14 @@ def main():
     parser.add_argument(
         '-d', '--domain', help='The target domain.', required=True)
     parser.add_argument('-n', '--num',
-                        help='The number of coroutine.', default=1000, type=int)
+                        help='The number of coroutine.The default value is 1000.', default=1000, type=int)
     parser.add_argument('-f', '--sub_filename',
-                        help="The name of subdomain file.", default='subnames.txt')
+                        help="The name of subdomain file.The default value is subnames.txt", default='subnames.txt')
     parser.add_argument('-t', '--timeout',
-                        help='The number of seconds each name server is given to respond to a query on the first try.', default=0.2, type=float)
+                        help='The number of seconds each name server is given to respond to a query on the first try.The default value is 0.2', default=0.2, type=float)
     parser.add_argument('-s', '--nameserver',
-                        help='The nameserver to be used to do the lookups.', default='119.29.29.29')
-    parser.add_argument('-l', '--log_level', help='The level of logging.',
+                        help='The nameserver to be used to do the lookups.The default value is 119.29.29.29', default='119.29.29.29')
+    parser.add_argument('-l', '--log_level', help='The level of logging.The default value is INFO.',
                         default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'])
     args = parser.parse_args()
 
