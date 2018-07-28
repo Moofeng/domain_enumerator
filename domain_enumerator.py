@@ -21,10 +21,12 @@ class DomainEnumerator(object):
         self.domain = domain
         self.num = num
         self.sub_filename = sub_filename
+        self.next_sub_filename = 'subnames2.txt'
         self.loop = asyncio.get_event_loop()
         self.queue = asyncio.Queue(loop=self.loop)
         self.resolver = aiodns.DNSResolver(
             timeout=timeout, loop=self.loop, nameservers=[nameserver])
+        self.next_subs = []
         self.found_subs = {}
         eval("logger.setLevel(logging.{})".format(log_level))
 
@@ -53,6 +55,14 @@ class DomainEnumerator(object):
                     logger.debug('{domain}: {ips}'.format(
                         domain=full_domain, ips=ips))
                     self.found_subs[full_domain] = ips
+                    # 通过解析一个不存在的三级域名时产生的错误代号判断是否存在三级域名
+                    try:
+                        await self.resolver.query('moofeng.'+full_domain, 'A')
+                    except aiodns.error.DNSError as e:
+                        err_code, err_msg = e.args[0], e.args[1]
+                        if err_code is 4:
+                            for next_sub in self.next_subs:
+                                self.queue.put_nowait(next_sub+'.'+sub)
 
     def get_by_CT(self):
         # 该功能容易出现查询超时
@@ -80,6 +90,12 @@ class DomainEnumerator(object):
 
     def get_by_dic(self):
         logger.info("正在从字典中加载子域名...")
+        with open(self.next_sub_filename) as f:
+            for line in f:
+                sub = line.strip().lower()
+                if sub == '':
+                    continue
+                self.next_subs.append(sub)
         with open(self.sub_filename) as f:
             for line in f:
                 sub = line.strip().lower()
@@ -92,7 +108,7 @@ class DomainEnumerator(object):
         self.loop.close()
 
     def get_by_virustotal(self):
-       pass 
+        pass
 
     def run(self):
         start_time = time.time()
