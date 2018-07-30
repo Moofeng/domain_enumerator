@@ -1,5 +1,7 @@
+from bs4 import BeautifulSoup as bs
 import psycopg2
 import argparse
+import requests
 import asyncio
 import logging
 import aiodns
@@ -17,25 +19,28 @@ DB_USER = 'guest'
 
 
 class DomainEnumerator(object):
-    def __init__(self, domain, sub_filename='subnames.txt', num=1000, timeout=0.2, nameserver='119.29.29.29', log_level='INFO'):
+    def __init__(self, domain, sub_filename='subnames.txt', num=1000, timeout=0.2, nameserver='119.29.29.29', log_level='INFO', query_next_sub=1, CT=1, third_part=1):
         self.domain = domain
         self.num = num
         self.sub_filename = sub_filename
+        self.query_next_sub = query_next_sub
+        self.CT = CT
+        self.third_part = third_part
         self.next_sub_filename = 'subnames2.txt'
         self.loop = asyncio.get_event_loop()
         self.queue = asyncio.Queue(loop=self.loop)
         self.resolver = aiodns.DNSResolver(
             timeout=timeout, loop=self.loop, nameservers=[nameserver])
         self.next_subs = []
-        self.found_subs = {}
+        self.found_domain = {}
         eval("logger.setLevel(logging.{})".format(log_level))
 
     async def query(self):
         while not self.queue.empty():
             sub = await self.queue.get()
-            if sub in self.found_subs:
-                continue
             full_domain = sub + '.' + self.domain
+            if full_domain in self.found_domain:
+                continue
             try:
                 result = await self.resolver.query(full_domain, 'A')
                 ips = [r.host for r in result]
@@ -54,15 +59,16 @@ class DomainEnumerator(object):
                 if ips:
                     logger.debug('{domain}: {ips}'.format(
                         domain=full_domain, ips=ips))
-                    self.found_subs[full_domain] = ips
+                    self.found_domain[full_domain] = ips
                     # 通过解析一个不存在的三级域名时产生的错误代号判断是否存在三级域名
-                    try:
-                        await self.resolver.query('moofeng.'+full_domain, 'A')
-                    except aiodns.error.DNSError as e:
-                        err_code, err_msg = e.args[0], e.args[1]
-                        if err_code is 4:
-                            for next_sub in self.next_subs:
-                                self.queue.put_nowait(next_sub+'.'+sub)
+                    if self.query_next_sub:
+                        try:
+                            await self.resolver.query('moofeng.'+full_domain, 'A')
+                        except aiodns.error.DNSError as e:
+                            err_code, err_msg = e.args[0], e.args[1]
+                            if err_code is 4:
+                                for next_sub in self.next_subs:
+                                    self.queue.put_nowait(next_sub+'.'+sub)
 
     def get_by_CT(self):
         # 该功能容易出现查询超时
@@ -90,12 +96,13 @@ class DomainEnumerator(object):
 
     def get_by_dic(self):
         logger.info("正在从字典中加载子域名...")
-        with open(self.next_sub_filename) as f:
-            for line in f:
-                sub = line.strip().lower()
-                if sub == '':
-                    continue
-                self.next_subs.append(sub)
+        if self.query_next_sub:
+            with open(self.next_sub_filename) as f:
+                for line in f:
+                    sub = line.strip().lower()
+                    if sub == '':
+                        continue
+                    self.next_subs.append(sub)
         with open(self.sub_filename) as f:
             for line in f:
                 sub = line.strip().lower()
@@ -107,17 +114,41 @@ class DomainEnumerator(object):
         self.loop.run_until_complete(asyncio.gather(*tasks))
         self.loop.close()
 
-    def get_by_virustotal(self):
-        pass
+    def get_by_third_part(self):
+        logger.info('正在通过第三方网站(dnsdumpster.com)接口查询...')
+        url = 'https://dnsdumpster.com/'
+        req = requests.get(url)
+        soup = bs(req.content, 'html.parser')
+        csrf_token = soup.findAll(
+            'input', attrs={'name': 'csrfmiddlewaretoken'})[0]['value']
+        cookies = {'csrftoken': csrf_token}
+        headers = {'Referer': url}
+        data = {'csrfmiddlewaretoken': csrf_token, 'targetip': self.domain}
+        req = requests.post(url, cookies=cookies, data=data, headers=headers)
+        soup = bs(req.content, 'html.parser')
+        table = soup.findAll('table')[3]
+        trs = table.findAll('tr')
+        for tr in trs:
+            tds = tr.findAll('td')
+            pattern_ip = r'([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})'
+            try:
+                ip = re.findall(pattern_ip, tds[1].text)[0]
+                domain = str(tds[0]).split('<br/>')[0].split('>')[1]
+                self.found_domain[domain] = ip
+            except:
+                logger.error('未获取到相关子域名信息！')
 
     def run(self):
         start_time = time.time()
         logger.info("正在进行子域名枚举...")
-        self.get_by_CT()
+        if self.CT:
+            self.get_by_CT()
+        if self.third_part:
+            self.get_by_third_part()
         self.get_by_dic()
         logger.info('一共找到 {domain} 下 {length} 个子域名, 总耗时为 {second:.3f}s'.format(
-            domain=self.domain, length=len(self.found_subs), second=time.time()-start_time))
-        logger.info(self.found_subs)
+            domain=self.domain, length=len(self.found_domain), second=time.time()-start_time))
+        logger.info(self.found_domain)
 
 
 def main():
@@ -134,6 +165,12 @@ def main():
                         help='The nameserver to be used to do the lookups.The default value is 119.29.29.29', default='119.29.29.29')
     parser.add_argument('-l', '--log_level', help='The level of logging.The default value is INFO.',
                         default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'])
+    parser.add_argument('-q', '--query_next_sub',
+                        help='Whether to enumerate multiple subdomains.', default=1, type=int, choices=[0, 1])
+    parser.add_argument('-c', '--CT', help='Whether to use CT log enumeration technology.',
+                        default=1, type=int, choices=[0, 1])
+    parser.add_argument('-p', '--third_part', help='Whether to use a third party interface to query subdomain information.',
+                        default=1, type=int, choices=[0, 1])
     args = parser.parse_args()
 
     domain = args.domain
@@ -142,9 +179,12 @@ def main():
     timeout = args.timeout
     nameserver = args.nameserver
     log_level = args.log_level
+    query_next_sub = args.query_next_sub
+    CT = args.CT
+    third_part = args.third_part
 
     s = DomainEnumerator(domain, sub_filename, num,
-                         timeout, nameserver, log_level)
+                         timeout, nameserver, log_level, query_next_sub, CT, third_part)
     s.run()
 
 
