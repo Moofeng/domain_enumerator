@@ -5,6 +5,7 @@ import requests
 import asyncio
 import logging
 import aiodns
+import json
 import time
 import re
 
@@ -19,7 +20,7 @@ DB_USER = 'guest'
 
 
 class DomainEnumerator(object):
-    def __init__(self, domain, sub_filename='subnames.txt', num=1000, timeout=0.2, nameserver='119.29.29.29', log_level='INFO', query_next_sub=1, CT=1, third_part=1):
+    def __init__(self, domain, sub_filename='subnames.txt', num=1000, timeout=0.2, nameserver='119.29.29.29', log_level='INFO', query_next_sub=1, CT=1, third_part=1, output_filename='result.json'):
         self.domain = domain
         self.num = num
         self.sub_filename = sub_filename
@@ -27,12 +28,14 @@ class DomainEnumerator(object):
         self.CT = CT
         self.third_part = third_part
         self.next_sub_filename = 'subnames2.txt'
+        self.output_filename = output_filename
         self.loop = asyncio.get_event_loop()
         self.queue = asyncio.Queue(loop=self.loop)
         self.resolver = aiodns.DNSResolver(
             timeout=timeout, loop=self.loop, nameservers=[nameserver])
         self.next_subs = []
         self.found_domain = {}
+        self._ips = {}
         eval("logger.setLevel(logging.{})".format(log_level))
 
     async def query(self):
@@ -57,6 +60,14 @@ class DomainEnumerator(object):
                     if ip in ['0.0.0.1', '0.0.0.0', '1.1.1.1']:
                         ips.remove(ip)
                 if ips:
+                    ips.sort()
+                    # 给每个域名解析所得ＩＰ结果计数，若某个ＩＰ超过２０次出现，可能存在域名泛解析问题，则舍弃对应域名
+                    try:
+                        self._ips[str(ips)] += 1
+                        if self._ips[str(ips)] > 20:
+                            continue
+                    except KeyError:
+                        self._ips[str(ips)] = 0
                     logger.debug('{domain}: {ips}'.format(
                         domain=full_domain, ips=ips))
                     self.found_domain[full_domain] = ips
@@ -138,6 +149,17 @@ class DomainEnumerator(object):
             except:
                 logger.error('未获取到相关子域名信息！')
 
+    # 清洗可能存在的泛解析域名
+    def data_cleaning(self):
+        ips = []
+        for ip, num in self._ips.items():
+            if num > 20:
+                ips.append(eval(ip))
+        for domain, ip in self.found_domain.copy().items():
+            if ip in ips:
+                self.found_domain.pop(domain)
+        logger.info("可能存在域名泛解析问题的ＩＰ: {}".format(ips))
+
     def run(self):
         start_time = time.time()
         logger.info("正在进行子域名枚举...")
@@ -146,9 +168,13 @@ class DomainEnumerator(object):
         if self.third_part:
             self.get_by_third_part()
         self.get_by_dic()
+        self.data_cleaning()
+        # 以json形式存储查询结果
+        with open(self.output_filename, 'w') as f:
+            json.dump(self.found_domain, f)
+            logger.info('查询结果以输出到文件 {} 中！'.format(self.output_filename))
         logger.info('一共找到 {domain} 下 {length} 个子域名, 总耗时为 {second:.3f}s'.format(
             domain=self.domain, length=len(self.found_domain), second=time.time()-start_time))
-        logger.info(self.found_domain)
 
 
 def main():
@@ -171,6 +197,7 @@ def main():
                         default=1, type=int, choices=[0, 1])
     parser.add_argument('-p', '--third_part', help='Whether to use a third party interface to query subdomain information.',
                         default=1, type=int, choices=[0, 1])
+    parser.add_argument('-o', '--output_filename', help='Specifies the name of the file that holds the results', default='result.json')
     args = parser.parse_args()
 
     domain = args.domain
@@ -182,9 +209,10 @@ def main():
     query_next_sub = args.query_next_sub
     CT = args.CT
     third_part = args.third_part
+    output_filename = args.output_filename
 
     s = DomainEnumerator(domain, sub_filename, num,
-                         timeout, nameserver, log_level, query_next_sub, CT, third_part)
+                         timeout, nameserver, log_level, query_next_sub, CT, third_part, output_filename)
     s.run()
 
 
