@@ -121,6 +121,7 @@ class DomainEnumerator(object):
                     continue
                 self.queue.put_nowait(sub)
         logger.info("成功加载{size}个子域名!".format(size=self.queue.qsize()))
+        logger.info("正在通过字典枚举子域名...")
         tasks = (self.query() for _ in range(self.num))
         self.loop.run_until_complete(asyncio.gather(*tasks))
         self.loop.close()
@@ -149,8 +150,8 @@ class DomainEnumerator(object):
             except:
                 logger.error('未获取到相关子域名信息！')
 
-    # 清洗可能存在的泛解析域名
     def data_cleaning(self):
+        logger.info("正在清洗可能存在的泛解析域名...")
         ips = []
         for ip, num in self._ips.items():
             if num > 20:
@@ -192,9 +193,9 @@ def main():
     parser.add_argument('-l', '--log_level', help='The level of logging.The default value is INFO.',
                         default='INFO', choices=['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'])
     parser.add_argument('-q', '--query_next_sub',
-                        help='Whether to enumerate multiple subdomains.', default=1, type=int, choices=[0, 1])
+                        help='Whether to enumerate multiple subdomains.', default=0, type=int, choices=[0, 1])
     parser.add_argument('-c', '--CT', help='Whether to use CT log enumeration technology.',
-                        default=1, type=int, choices=[0, 1])
+                        default=0, type=int, choices=[0, 1])
     parser.add_argument('-p', '--third_part', help='Whether to use a third party interface to query subdomain information.',
                         default=1, type=int, choices=[0, 1])
     parser.add_argument('-o', '--output_filename', help='Specifies the name of the file that holds the results', default='result.json')
