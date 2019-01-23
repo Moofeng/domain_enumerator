@@ -42,7 +42,7 @@ class DomainEnumerator(object):
         self._pg_pool = pg_pool
         self._CT_finished = False
         self._3rd_finished = False
-    
+
     async def _dns_query(self):
         while not self._dns_resolve_queue.empty() or (self._CT and not self._CT_finished) or (self._third_part and not self._3rd_finished):
             if self._dns_resolve_queue.empty():
@@ -93,6 +93,7 @@ class DomainEnumerator(object):
                             if err_code is 4:
                                 for next_sub in self._next_subs:
                                     await self._dns_resolve_queue.put(next_sub+'.' + domain)
+
 
     async def _get_by_CT(self):
         # 该功能容易出现查询超时

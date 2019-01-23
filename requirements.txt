@@ -1,3 +1,4 @@
-aiodns
-aiohttp
-asyncpg
+aiohttp==3.3.2
+aiodns==1.1.1
+asyncpg==0.18.2
+beautifulsoup4==4.7.1
